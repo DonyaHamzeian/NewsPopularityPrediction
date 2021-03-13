@@ -1,0 +1,1339 @@
+---
+title: "Appendix"
+author: "STAT 844/CM 764 Winter 2020"
+date: "Donya Hamzeian 20852145"
+output: 
+    pdf_document:
+        keep_tex: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, tidy = T)
+```
+
+
+
+
+
+
+#load libraries
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggcorrplot)
+library(gridExtra)
+library(xgboost)
+library(ranger)
+library(caret)
+library(Metrics)
+library(EnvStats)
+library(glmnet)
+
+```
+
+#A.1
+
+
+```{r }
+#Read data
+newsPopularity =read.csv("OnlineNewsPopularity.csv", stringsAsFactors = F)
+df = newsPopularity[,c(1,14:19)]
+#convert one-hot encoding of channel variable into a factor variable with 7 levels
+colnames(df) = c("url", "lifestyle", "entertainment", "bus", "socmed", "tech", "world")
+df$miscellaneous =  ifelse( df[,2]==0 & df[,3]==0& df[,4]==0& df[,5]==0& df[,6]==0& df[, 7]==0,1,0)
+df2 = df %>% gather(channel, value, -url) %>% arrange(url) %>% filter(value>0) %>% select(-value)
+newsPopularity = merge(newsPopularity, df2, by = "url")
+newsPopularity = newsPopularity[, -c(14:19)]
+newsPopularity$channel = as.factor(newsPopularity$channel)
+
+#convert one-hot encoding of weekday variable into a factor variable with 7 levels
+df = newsPopularity %>%
+  select(url, starts_with("weekday_"))
+colnames(df) = c("url", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+df = df%>% gather(weekday, value, -url) %>% arrange(url) %>% filter(value>0) %>% select(-value)
+
+newsPopularity = merge(newsPopularity, df, by = "url")
+newsPopularity = newsPopularity %>% select(-starts_with(("weekday_")))
+newsPopularity$weekday = as.factor(newsPopularity$weekday)
+
+#removed is_weekend because its information is already in is_saturday or is_sunday (categorical variable of weekday)
+newsPopularity$is_weekend =NULL
+#removed url because it is non-predictive
+newsPopularity$url = NULL
+#removed timedelta because it's non-predictive
+newsPopularity$timedelta = NULL
+#removed abs_title_subjectivity because its information is in title_subjectivity
+newsPopularity$abs_title_subjectivity = NULL
+#removed abs_title_sentiment_polarity because its information is in title_sentiment_polarity
+newsPopularity$abs_title_sentiment_polarity = NULL
+#removed LDA_04 because of collinearity
+newsPopularity$LDA_04 = NULL
+#outlier removed, row 31038
+newsPopularity %>% filter(n_unique_tokens<=1)-> newsPopularity
+
+```
+
+##Correlations with shares column
+```{r}
+nums <- unlist(lapply(newsPopularity, is.numeric ))  
+cor(newsPopularity[, nums])-> corr
+sort(abs(corr[, "shares"]), decreasing = T)[1:10]
+```
+
+In the above, you can see the 10 columns that have the highest correlation with shares column.
+
+#A.2
+
+##figure1
+```{r}
+s1 = ggplot(newsPopularity, aes(shares))+geom_histogram(bins = 30)
+s2 = ggplot(newsPopularity, aes(log(shares)))+geom_histogram(bins = 30)
+ggsave(filename = "imgs/shares_histogram.png", grid.arrange(s1, s2, ncol= 2 ), width = 6, height = 2)
+            
+```
+
+Preprocessing on the target variable
+```{r}
+newsPopularity$shares = log(newsPopularity$shares)
+
+```
+
+#A.3
+I)
+```{r}
+#extracting no_zero and  no_content
+no_zero = newsPopularity %>% filter(n_tokens_content>0 & !(self_reference_min_shares==0 & self_reference_max_shares==0 & self_reference_avg_sharess==0))
+no_content  = newsPopularity %>% filter(n_tokens_content==0)
+#removing all-zeroes columns in no_content
+no_content$n_tokens_content = NULL
+no_content$n_unique_tokens = NULL
+no_content$n_non_stop_unique_tokens = NULL
+no_content$num_hrefs = NULL
+no_content$num_self_hrefs = NULL
+no_content$average_token_length = NULL
+no_content$self_reference_min_shares = NULL
+no_content$self_reference_max_shares = NULL
+no_content$self_reference_avg_sharess = NULL
+no_content$global_subjectivity = NULL
+no_content$global_sentiment_polarity = NULL
+no_content$global_rate_positive_words = NULL
+no_content$global_rate_negative_words = NULL
+no_content$rate_negative_words = NULL
+no_content$rate_positive_words = NULL
+no_content$rate_positive_words = NULL
+no_content$avg_positive_polarity = NULL
+no_content$avg_negative_polarity = NULL
+no_content$min_positive_polarity = NULL
+no_content$min_negative_polarity = NULL
+no_content$max_positive_polarity = NULL
+no_content$max_negative_polarity = NULL
+no_content$n_non_stop_words = NULL
+
+```
+
+Hypothesis test to see if the distribution of log of shares in `no_content` data is significantly different from in `no_zero` data
+
+```{r}
+t.test(no_content$shares, no_zero$shares)
+
+```
+
+The result of t.test, very small p.value,  shows that we can reject the null hypothesis(That their distribution is the same)
+
+II)
+```{r}
+#extracting no_shares data
+no_shares = newsPopularity %>% filter(n_tokens_content>0 & self_reference_min_shares==0 & self_reference_max_shares==0 & self_reference_avg_sharess==0)
+
+#removing all-zeroes columns in no_shares data
+no_shares$self_reference_min_shares = NULL
+no_shares$self_reference_max_shares = NULL 
+no_shares$self_reference_avg_sharess = NULL
+
+```
+
+Hypothesis test to see if the distribution of log of shares in `no_shares` data is significantly different from in `no_zero` data
+
+```{r}
+t.test(no_shares$shares, no_zero$shares)
+
+```
+
+The result of t.test, very small p.value, shows that we can reject the null hypothesis(That their distribution is the same)
+
+
+#A.4
+
+## I) preprocessing for no_zero data
+
+```{r}
+
+summary(no_zero$n_non_stop_words)
+no_zero$n_non_stop_words = NULL
+```
+The above statistics show that this column is all-ones and must be removed
+
+Preliminary linear model to see the significant variables in predicting log of shares in `no_zero` data
+```{r}
+summary(lm(data = no_zero, shares~.))
+```
+
+Figure2
+```{r}
+
+sh10 = ggplot(no_zero, aes(self_reference_min_shares)) + geom_histogram(bins = 30)
+sh20 = ggplot(no_zero, aes(self_reference_max_shares)) + geom_histogram(bins = 30)
+sh30 = ggplot(no_zero, aes(self_reference_avg_sharess)) + geom_histogram(bins = 30)
+
+sh1 = ggplot(no_zero, aes(log(self_reference_min_shares))) + geom_histogram(bins = 30)
+sh2 = ggplot(no_zero, aes(log(self_reference_max_shares))) + geom_histogram(bins = 30)
+sh3 = ggplot(no_zero, aes(log(self_reference_avg_sharess))) + geom_histogram(bins = 30)
+
+ggsave(filename = 'imgs/self_reference_shares.png', grid.arrange(  sh10,sh1,sh20, sh2, sh30, sh3, nrow = 3, ncol = 2 ), width =6, height = 4)
+
+```
+
+Figure3
+```{r}
+n0 = ggplot(no_zero, aes(n_tokens_content)) + geom_histogram(bins = 30 )
+
+n1 = ggplot(no_zero, aes(log(n_tokens_content))) + geom_histogram(bins = 30 )
+ggsave(grid.arrange(n0, n1 , ncol = 2), filename = "imgs/n_tokens_content_no_zero.png", width = 6, height = 2)
+```
+
+Figure4
+```{r}
+href1 = ggplot(no_zero, aes(num_hrefs)) + geom_histogram(bins = 100)
+href2 = ggplot(no_zero, aes(log(num_hrefs))) + geom_histogram(bins = 10)
+ggsave(grid.arrange(href1, href2 , ncol = 2), filename = "imgs/num_href_no_zero.png", width = 6, height = 2)
+
+```
+
+Figure5
+```{r}
+shref1 = ggplot(no_zero, aes(num_self_hrefs)) + geom_histogram(bins = 50)
+shref2 = ggplot(no_zero, aes(log(num_self_hrefs))) + geom_histogram(bins = 30)
+ggsave(grid.arrange(shref1, shref2 , ncol = 2), filename = "imgs/num_shref_no_zero.png", width = 6, height = 2)
+
+```
+
+Figure6
+```{r}
+images = ggplot(no_zero, aes(num_imgs)) + geom_histogram(bins = 50)
+videos = ggplot(no_zero, aes(num_videos)) + geom_histogram(bins = 50)
+ggsave(grid.arrange(images, videos , ncol = 2), filename = "imgs/img_videos_no_zero.png", width = 6, height = 2)
+
+```
+
+Figure7
+```{r}
+kw1= ggplot(no_zero, aes(kw_min_min)) + geom_histogram(bins = 50)
+kw2= ggplot(no_zero, aes(kw_max_min)) + geom_histogram(bins = 50)
+kw3= ggplot(no_zero, aes(kw_avg_min)) + geom_histogram(bins = 50)
+kw4= ggplot(no_zero, aes(kw_min_max)) + geom_histogram(bins = 50)
+kw5= ggplot(no_zero, aes(kw_max_max)) + geom_histogram(bins = 50)
+kw6= ggplot(no_zero, aes(kw_avg_max)) + geom_histogram(bins = 50)
+kw7= ggplot(no_zero, aes(kw_min_avg)) + geom_histogram(bins = 50)
+kw8= ggplot(no_zero, aes(kw_max_avg)) + geom_histogram(bins = 50)
+kw9= ggplot(no_zero, aes(kw_avg_avg)) + geom_histogram(bins = 50)
+
+ggsave(grid.arrange( kw1, kw2, kw3, kw4, kw5, kw6, kw7, kw8, kw9, nrow = 3, ncol = 3), width = 6, height = 4, filename = "imgs/kw_before_no_zero.png")
+
+```
+
+
+preprocessing on no_zero data
+```{r}
+no_zero$self_reference_min_shares = log(no_zero$self_reference_min_shares)
+
+no_zero$self_reference_max_shares = log(no_zero$self_reference_max_shares)
+
+no_zero$self_reference_avg_sharess = log(no_zero$self_reference_avg_sharess)
+
+no_zero$n_tokens_content =log(no_zero$n_tokens_content)
+no_zero$num_hrefs = log(no_zero$num_hrefs)
+
+no_zero[no_zero$num_self_hrefs>30, ]$num_self_hrefs= 30
+no_zero[no_zero$num_imgs>25, ]$num_imgs = 25
+no_zero[no_zero$num_videos>6, ]$num_videos = 6
+no_zero$kw_min_min = as.factor(ifelse(no_zero$kw_min_min==-1, 0, 1))
+
+no_zero$kw_min_max = NULL
+no_zero$kw_max_max = NULL
+
+
+no_zero[no_zero$kw_avg_min ==-1, ]$kw_avg_min = mean(no_zero[no_zero$kw_avg_min!=-1, ]$kw_avg_min)
+no_zero[no_zero$kw_min_avg ==-1, ]$kw_min_avg = mean(no_zero[no_zero$kw_min_avg!=-1, ]$kw_min_avg)
+
+no_zero$kw_min_avg = log(no_zero$kw_min_avg+1)
+no_zero$kw_avg_min = log(no_zero$kw_avg_min+1)
+
+no_zero$kw_avg_avg = log(no_zero$kw_avg_avg+1)
+no_zero$kw_max_avg = log(no_zero$kw_max_avg+1)
+no_zero$kw_max_min = log(no_zero$kw_max_min+1)
+
+```
+
+
+kw histograms after preprocessing
+```{r}
+kw2= ggplot(no_zero, aes(kw_max_min)) + geom_histogram(bins = 50)
+kw3= ggplot(no_zero, aes(kw_avg_min)) + geom_histogram(bins = 50)
+kw7= ggplot(no_zero, aes(kw_min_avg)) + geom_histogram(bins = 50)
+kw8= ggplot(no_zero, aes(kw_max_avg)) + geom_histogram(bins = 50)
+kw9= ggplot(no_zero, aes(kw_avg_avg)) + geom_histogram(bins = 50)
+
+ggsave(grid.arrange(  kw2, kw3, kw7, kw8, kw9, nrow = 5),  filename = "imgs/kw_after_no_zero.png")
+
+```
+
+Correlation with shares after preprocessing in `no_zero` data
+```{r}
+nums <- unlist(lapply(no_zero, is.numeric ))  
+cor(no_zero[, nums])-> corr
+sort(abs(corr[, "shares"]), decreasing = T)[1:10]
+```
+
+The correlation of columns with shares column has become greater.
+
+###Unchanged columns
+
+Figure8
+```{r}
+n1 = ggplot(no_zero, aes(n_tokens_title)) + geom_histogram(bins = 20)
+n2 = ggplot(no_zero, aes(n_unique_tokens)) + geom_histogram(bins = 20)
+n3 = ggplot(no_zero, aes(n_non_stop_unique_tokens)) + geom_histogram(bins = 20)
+
+ggsave(grid.arrange(n1, n2,n3, ncol = 3), filename = "imgs/n_tokens_unchanged_no_zero.png", width = 6, height = 2)
+
+```
+
+Figure9
+```{r}
+ggsave(ggplot(no_zero, aes(average_token_length)) + geom_histogram(bins = 30), filename = "imgs/avg_token_no_zero.png", width = 3, height= 1)
+```
+
+Figure10 
+```{r}
+ggsave(ggplot(no_zero, aes(num_keywords)) + geom_bar(), filename = "imgs/num_kw_no_zero.png", width = 3, height=1)
+
+
+
+```
+
+
+Figure11
+```{r}
+lda0= ggplot(no_zero, aes(LDA_00)) + geom_histogram()
+lda1= ggplot(no_zero, aes(LDA_01)) + geom_histogram()
+lda2= ggplot(no_zero, aes(LDA_02)) + geom_histogram()
+lda3= ggplot(no_zero, aes(LDA_03)) + geom_histogram()
+
+ggsave(grid.arrange(lda0, lda1, lda2, lda3, nrow = 2, ncol = 2), filename = "imgs/LDA_no_zero.png", width = 6, height = 2)
+```
+
+Figure12
+```{r}
+
+p1 = ggplot(no_zero, aes(avg_positive_polarity )) + geom_histogram()
+
+p2 = ggplot(no_zero, aes(max_positive_polarity )) + geom_histogram()
+p3 = ggplot(no_zero, aes(min_positive_polarity )) + geom_histogram()
+
+p4 = ggplot(no_zero, aes(avg_negative_polarity )) + geom_histogram()
+
+p5 = ggplot(no_zero, aes(max_negative_polarity )) + geom_histogram()
+p6 = ggplot(no_zero, aes(min_negative_polarity )) + geom_histogram()
+
+ggsave(grid.arrange(p1, p2, p3, p4, p5, p6,  nrow = 2, ncol =3), filename = "imgs/polarity_no_zero.png", width = 6, height = 4)
+```
+
+
+Figure13
+```{r}
+ggsave(ggplot(no_zero, aes(global_sentiment_polarity )) + geom_histogram(bins = 30),filename = "imgs/global_polarity_no_zero.png", width = 6, height = 2)
+
+```
+
+Figure14
+```{r}
+ggsave(ggplot(no_zero, aes(title_sentiment_polarity )) + geom_histogram(bins = 30),filename = "imgs/title_polarity_no_zero.png", width = 6, height = 2)
+
+rt = rosnerTest(no_zero$title_sentiment_polarity, k=10)
+print("number of outliers detected by rosner test for title_sentiment_polarity:")
+rt$n.outliers
+```
+rosner test identifies no outliers in `title_sentiment_polarity` column
+
+Figure15
+```{r}
+r1 = ggplot(no_zero, aes(global_rate_positive_words )) + geom_histogram(bins = 30)
+r2 = ggplot(no_zero, aes(global_rate_negative_words )) + geom_histogram(bins = 30)
+r3 = ggplot(no_zero, aes(rate_positive_words )) + geom_histogram(bins = 30)
+r4 = ggplot(no_zero, aes(rate_negative_words )) + geom_histogram(bins = 30)
+ggsave(grid.arrange(r1,r2,r3,r4,  nrow = 2, ncol =2), filename = "imgs/rate_no_zero.png", width = 6, height = 2)
+```
+
+Figure16
+```{r}
+s1 = ggplot(no_zero, aes(global_subjectivity )) + geom_histogram(bins = 30)
+s2 = ggplot(no_zero, aes(title_subjectivity )) + geom_histogram(bins = 60)
+
+ggsave(grid.arrange(s1, s2,  nrow = 2), filename = "imgs/subjectivity_no_zero.png", width = 4, height = 2)
+rt = rosnerTest(no_zero$title_subjectivity, 10)
+print("number of outliers detected by rosner test for title_subjectivity:")
+rt$n.outliers
+```
+rosnerTest identifies no outlier for the `title_subjectivity` column.
+
+Figure17
+```{r}
+weekday = ggplot(no_zero, aes(x= weekday, y= shares))+ geom_bar(stat = "summary", fun.y = "mean")
+channel = ggplot(no_zero, aes(x= channel, y= shares))+ geom_bar(stat = "summary", fun.y = "mean")
+ggsave(grid.arrange(weekday, channel,  nrow = 2), filename = "imgs/weekday_channel_no_zero.png", height = 3, width= 6)
+
+
+```
+
+
+####II) preprocessing for no_shares  data
+```{r}
+summary(no_shares$n_non_stop_words)
+no_zero$n_non_stop_words = NULL
+
+```
+The above statistics show that this column is all-ones and must be removed
+
+Preliminary linear model to see the significant variables in predicting log of shares in `no_shares` data
+
+```{r}
+summary(lm(data = no_shares, shares~.))
+```
+
+
+
+Figure 18
+```{r}
+n0 = ggplot(no_shares, aes(n_tokens_content)) + geom_histogram(bins = 30 )
+
+n1 = ggplot(no_shares, aes(log(n_tokens_content))) + geom_histogram(bins = 30 )
+ggsave(grid.arrange(n0, n1 , ncol = 2), filename = "imgs/n_tokens_content_no_shares.png", width = 6, height = 2)
+```
+
+Figure 19
+```{r}
+href1 = ggplot(no_shares, aes(num_hrefs)) + geom_histogram(bins = 100)
+href2 = ggplot(no_shares, aes(log(num_hrefs+1))) + geom_histogram(bins = 10)
+ggsave(grid.arrange(href1, href2 , ncol = 2), filename = "imgs/num_href_no_shares.png", width = 6, height = 2)
+
+```
+
+Figure 20
+```{r}
+shref1 = ggplot(no_shares, aes(num_self_hrefs)) + geom_histogram(bins = 30)
+shref2 = ggplot(no_shares, aes(log(num_self_hrefs+1))) + geom_histogram(bins = 10)
+ggsave(grid.arrange(shref1, shref2 , ncol = 2), filename = "imgs/num_shref_no_shares.png", width = 6, height = 2)
+
+```
+
+Figure 21
+```{r}
+images = ggplot(no_shares, aes(num_imgs)) + geom_histogram(bins = 50)
+videos = ggplot(no_shares, aes(num_videos)) + geom_histogram(bins = 50)
+ggsave(grid.arrange(images, videos , ncol = 2), filename = "imgs/img_videos_no_shares.png", width = 6, height = 2)
+
+```
+
+
+Figure 22
+```{r}
+kw1= ggplot(no_shares, aes(kw_min_min)) + geom_histogram(bins = 50)+theme(axis.text.x = element_text(angle = -20))
+kw2= ggplot(no_shares, aes(kw_max_min)) + geom_histogram(bins = 50)+theme(axis.text.x = element_text(angle = -20))
+kw3= ggplot(no_shares, aes(kw_avg_min)) + geom_histogram(bins = 50)+theme(axis.text.x = element_text(angle = -20))
+kw4= ggplot(no_shares, aes(kw_min_max)) + geom_histogram(bins = 50)+theme(axis.text.x = element_text(angle = -20))
+kw5= ggplot(no_shares, aes(kw_max_max)) + geom_histogram(bins = 50)+theme(axis.text.x = element_text(angle = -20))
+kw6= ggplot(no_shares, aes(kw_avg_max)) + geom_histogram(bins = 50)+theme(axis.text.x = element_text(angle = -20))
+kw7= ggplot(no_shares, aes(kw_min_avg)) + geom_histogram(bins = 50)+theme(axis.text.x = element_text(angle = -20))
+kw8= ggplot(no_shares, aes(kw_max_avg)) + geom_histogram(bins = 50)+theme(axis.text.x = element_text(angle = -20))
+kw9= ggplot(no_shares, aes(kw_avg_avg)) + geom_histogram(bins = 50)+theme(axis.text.x = element_text(angle = -20))
+
+ggsave(grid.arrange( kw1, kw2, kw3, kw4, kw5, kw6, kw7, kw8, kw9, nrow = 3, ncol = 3), width = 6, height = 4, filename = "imgs/kw_before_no_shares.png")
+
+```
+
+Preprocessing on `no_shares` data
+```{r}
+
+no_shares$n_tokens_content = log(no_shares$n_tokens_content)
+no_shares$num_hrefs = log(no_shares$num_hrefs+1)
+
+no_shares[no_shares$num_self_hrefs>5, ]$num_self_hrefs= 5
+no_shares[no_shares$num_imgs>7, ]$num_imgs = 7
+no_shares[no_shares$num_videos>5, ]$num_videos = 5
+tmp = rep('1', nrow(no_shares))
+tmp[no_shares$kw_min_min>=0 & no_shares$kw_min_min<=4]= '2'
+tmp[no_shares$kw_min_min>4]= '3'
+
+no_shares$kw_min_min = as.factor(tmp)
+no_shares$kw_min_avg = log(no_shares$kw_min_avg+1)
+no_shares[no_shares$kw_avg_min ==-1, ]$kw_avg_min = mean(no_shares[no_shares$kw_avg_min!=-1, ]$kw_avg_min)
+
+no_shares$kw_avg_min = log(no_shares$kw_avg_min+1)
+no_shares$kw_max_avg = log(no_shares$kw_max_avg+1)
+
+no_shares$kw_max_min = NULL
+no_shares$kw_min_max = NULL
+no_shares$kw_max_max = NULL
+
+```
+
+Figure 23
+```{r}
+kw3= ggplot(no_shares, aes(kw_avg_min)) + geom_histogram(bins = 50)
+kw7= ggplot(no_shares, aes(kw_min_avg)) + geom_histogram(bins = 50)
+kw8= ggplot(no_shares, aes(kw_max_avg)) + geom_histogram(bins = 50)
+
+ggsave(grid.arrange(   kw3, kw7, kw8, nrow = 3),  filename = "imgs/kw_after_no_shares.png")
+
+```
+
+#####The unchanged columns
+Figure 24
+```{r}
+n1 = ggplot(no_shares, aes(n_tokens_title)) + geom_histogram(bins = 15)
+n2 = ggplot(no_shares, aes(n_unique_tokens)) + geom_histogram(bins = 20)
+n3 = ggplot(no_shares, aes(n_non_stop_unique_tokens)) + geom_histogram(bins = 20)
+
+ggsave(grid.arrange(n1, n2, n3, ncol = 3), filename = "imgs/n_tokens_unchanged_no_shares.png", width = 6, height = 2)
+
+```
+
+
+Figure 25
+```{r}
+ggsave(ggplot(no_shares, aes(average_token_length)) + geom_histogram(bins = 30), filename = "imgs/avg_token_no_shares.png")
+```
+
+Figure 26
+```{r}
+ggsave(ggplot(no_shares, aes(num_keywords)) + geom_bar(), filename = "imgs/num_kw_no_share.png")
+
+
+```
+
+Figure 27
+```{r}
+lda0= ggplot(no_shares, aes(LDA_00)) + geom_histogram()
+lda1= ggplot(no_shares, aes(LDA_01)) + geom_histogram()
+lda2= ggplot(no_shares, aes(LDA_02)) + geom_histogram()
+lda3= ggplot(no_shares, aes(LDA_03)) + geom_histogram()
+
+ggsave(grid.arrange(lda0, lda1, lda2, lda3, nrow = 4), filename = "imgs/LDA_no_shares.png")
+```
+
+
+Figure 28
+```{r}
+
+p1 = ggplot(no_shares, aes(avg_positive_polarity )) + geom_histogram()
+
+p2 = ggplot(no_shares, aes(max_positive_polarity )) + geom_histogram()
+p3 = ggplot(no_shares, aes(min_positive_polarity )) + geom_histogram()
+
+p4 = ggplot(no_shares, aes(avg_negative_polarity )) + geom_histogram()
+
+p5 = ggplot(no_shares, aes(max_negative_polarity )) + geom_histogram()
+p6 = ggplot(no_shares, aes(min_negative_polarity )) + geom_histogram()
+
+ggsave(grid.arrange(p1, p2, p3, p4, p5, p6,  nrow = 2, ncol =3), filename= "imgs/polarity_no_shares.png", width = 6, height = 4)
+
+```
+
+Figure 29
+```{r}
+ggsave(ggplot(no_shares, aes(global_sentiment_polarity )) + geom_histogram(bins = 30),filename = "imgs/global_polarity_no_shares.png", width = 6, height = 2)
+```
+
+Figure 30
+```{r}
+ggsave(ggplot(no_shares, aes(title_sentiment_polarity )) + geom_histogram(bins = 30),filename = "imgs/title_polarity_no_shares.png", width = 6, height = 2)
+
+rt = rosnerTest(no_shares$title_sentiment_polarity, k=10)
+print("number of outliers detected by rosner test for title_sentiment_polarity :")
+rt$n.outliers
+```
+
+rosnerTest identifies no outlier in `title_sentiment_polarity` column.
+
+Figure 31
+```{r}
+r1 = ggplot(no_shares, aes(global_rate_positive_words )) + geom_histogram(bins = 30)
+r2 = ggplot(no_shares, aes(global_rate_negative_words )) + geom_histogram(bins = 30)
+r3 = ggplot(no_shares, aes(rate_positive_words )) + geom_histogram(bins = 30)
+r4 = ggplot(no_shares, aes(rate_negative_words )) + geom_histogram(bins = 30)
+ggsave(grid.arrange(r1,r2,r3,r4,  nrow = 2, ncol =2), filename = "imgs/rate_no_shares.png", width = 6, height = 2)
+```
+
+Figure 32
+```{r}
+s1 = ggplot(no_shares, aes(global_subjectivity )) + geom_histogram(bins = 30)
+s2 = ggplot(no_shares, aes(title_subjectivity )) + geom_histogram(bins = 60)
+
+ggsave(grid.arrange(s1, s2,  nrow = 2), filename = "imgs/subjectivity_no_shares.png")
+rt = rosnerTest(no_shares$title_subjectivity, 10)
+print("number of outliers detected by rosner test:")
+rt$n.outliers
+```
+rosnerTest identifies no outlier for the `title_subjectivity` column.
+
+###categorical variables
+Figure 33
+```{r}
+weekday = ggplot(no_shares, aes(x= weekday, y= shares))+ geom_bar(stat = "summary", fun.y = "mean")
+channel = ggplot(no_shares, aes(x= channel, y= shares))+ geom_bar(stat = "summary", fun.y = "mean")
+ggsave(grid.arrange(weekday, channel,  nrow = 2), filename = "imgs/weekday_channel_no_shares.png", height = 3, width= 6)
+
+
+```
+
+
+
+
+###III) preprocessing for  no_content data
+
+Preliminary linear model to see the significant variables in predicting log of shares in `no_content` data
+
+```{r}
+summary(lm(data = no_content, shares~.))
+```
+
+
+
+
+Figure 34
+```{r}
+images = ggplot(no_content, aes(num_imgs)) + geom_histogram(bins = 50)
+videos = ggplot(no_content, aes(num_videos)) + geom_histogram(bins = 50)
+ggsave(grid.arrange(images, videos , ncol = 2), filename = "imgs/img_videos_no_content.png", width = 6, height = 2)
+
+```
+
+
+Figure 35
+```{r}
+kw1= ggplot(no_content, aes(kw_min_min)) + geom_histogram(bins = 50)+theme(axis.text.x = element_text(angle = -20))
+kw2= ggplot(no_content, aes(kw_max_min)) + geom_histogram(bins = 50)+theme(axis.text.x = element_text(angle = -20))
+kw3= ggplot(no_content, aes(kw_avg_min)) + geom_histogram(bins = 50)+theme(axis.text.x = element_text(angle = -20))
+kw4= ggplot(no_content, aes(kw_min_max)) + geom_histogram(bins = 50)+theme(axis.text.x = element_text(angle = -20))
+kw5= ggplot(no_content, aes(kw_max_max)) + geom_histogram(bins = 50)+theme(axis.text.x = element_text(angle = -20))
+kw6= ggplot(no_content, aes(kw_avg_max)) + geom_histogram(bins = 50)+theme(axis.text.x = element_text(angle = -20))
+kw7= ggplot(no_content, aes(kw_min_avg)) + geom_histogram(bins = 50)+theme(axis.text.x = element_text(angle = -20))
+kw8= ggplot(no_content, aes(kw_max_avg)) + geom_histogram(bins = 50)+theme(axis.text.x = element_text(angle = -20))
+kw9= ggplot(no_content, aes(kw_avg_avg)) + geom_histogram(bins = 50)+theme(axis.text.x = element_text(angle = -20))
+
+ggsave(grid.arrange( kw1, kw2, kw3, kw4, kw5, kw6, kw7, kw8, kw9, nrow = 3, ncol = 3), width = 6, height = 4, filename = "imgs/kw_before_no_content.png")
+
+```
+
+Preprocessing on `no_content` data
+```{r}
+no_content[no_content$num_imgs>12, ]$num_imgs = 12
+no_content[no_content$num_videos>2, ]$num_imgs = 2
+no_content$kw_min_min = NULL
+no_content$kw_max_max = NULL
+no_content$kw_max_min = log(no_content$kw_max_min+1)
+no_content$kw_min_max = log(no_content$kw_min_max+1)
+no_content$kw_min_avg = as.factor(ifelse(no_content$kw_min_avg==0, 0, 1))
+no_content[no_content$kw_avg_min==-1, ]$kw_avg_min = mean(no_content[no_content$kw_avg_min!=-1, ]$kw_avg_min)
+no_content$kw_avg_min = log(no_content$kw_avg_min+1)
+
+
+```
+
+Figure 36
+```{r}
+kw2= ggplot(no_content, aes(kw_min_max)) + geom_histogram()
+
+kw3= ggplot(no_content, aes(kw_avg_min)) + geom_histogram()
+kw8= ggplot(no_content, aes(kw_max_min)) + geom_histogram()
+
+ggsave(grid.arrange(  kw2,  kw3,  kw8, nrow = 3),  filename = "imgs/kw_after_no_content.png")
+
+```
+
+
+
+####The unchanged columns
+
+Fiigure 37
+```{r}
+n1 = ggplot(no_content, aes(n_tokens_title)) + geom_histogram(bins = 15)
+n2 = ggplot(no_content, aes(num_keywords)) + geom_histogram(bins = 15)
+ggsave(grid.arrange(n1, n2, nrow = 2), filename = "imgs/n_tokens_unchanged.png")
+```
+
+Figure 38
+```{r}
+lda0= ggplot(no_content, aes(LDA_00)) + geom_histogram()
+lda1= ggplot(no_content, aes(LDA_01)) + geom_histogram()
+lda2= ggplot(no_content, aes(LDA_02)) + geom_histogram()
+lda3= ggplot(no_content, aes(LDA_03)) + geom_histogram()
+
+ggsave(grid.arrange(lda0, lda1, lda2, lda3, nrow = 4), filename = "imgs/LDA_no_content.png")
+```
+
+Figure 39
+```{r}
+s1 = ggplot(no_content, aes(title_sentiment_polarity )) + geom_histogram(bins = 30)
+s2 = ggplot(no_content, aes(title_subjectivity )) + geom_histogram(bins = 60)
+ggsave(grid.arrange(s1,s2, nrow = 2), filename = "imgs/title_no_content.png")
+rt = rosnerTest(no_content$title_sentiment_polarity, k=10)
+print("number of outliers detected by rosner test for title_sentiment_polarity:")
+rt$n.outliers
+rt = rosnerTest(no_content$title_subjectivity, k=10)
+print("number of outliers detected by rosner test for title_subjectivity:")
+rt$n.outliers
+```
+rosnerTest identifies no outlier in the `title_sentiment_polarity` column
+rosnerTest identifies no outlier in the `title_subjectivity` column
+
+###Categorical variables
+Figure 40
+```{r}
+weekday = ggplot(no_content, aes(x= weekday, y= shares))+ geom_bar(stat = "summary", fun.y = "mean")
+channel = ggplot(no_content, aes(x= channel, y= shares))+ geom_bar(stat = "summary", fun.y = "mean")
+ggsave(grid.arrange(weekday, channel,  nrow = 2), filename = "imgs/weekday_channel_no_content.png", height = 3, width= 6)
+
+
+```
+
+
+
+#A.5
+
+##I) Model Building for no_zero
+
+#Train/test split
+createDataPartitio in caret library was used to split the `no_zero` data to train and test. This function does startified splitting. 75% of the `no_zero` data was used as the train data and the rest was used as the test data.
+```{r}
+set.seed(116)
+inTrain_no_zero = createDataPartition(y= no_zero$shares, p=0.75, list = F)
+train_no_zero = no_zero[inTrain_no_zero, ]
+test_no_zero = no_zero[-inTrain_no_zero, ]
+```
+
+
+###random Forest
+For fitting a random forest model, `ranger` function from `ranger` package was used. 
+The values for the hyperparameters of this model were tuned by cross-validation which is more elaborated on in the next paragraph. The best hyperparameters found for this model on `no_zero` dataset are: splitrule ="extratrees", mtry = 24, and min.node.size = 1
+
+
+
+###tuning for random forest
+
+For tuning the hyperparameters of the random forest model, 3 fold crsoss-validation with random search was used. The tuneLength was set to 30, which means that 30 different setting of hyperparameters were trained on every 2 folds of the train dataset and tested on the third fold. The result of this cross validation is the average of the measure of  errors, including RMSE and MAE, on the test folds, for each hyperparameter setting. The best model can be chosen in order to minimze(or maximize) each of those measure of errors. However, we chose the best model in order to minimize the RMSE. 
+Since the tuning part takes so long to run, we set `eval = False`
+
+```{r, eval = F}
+set.seed(820)
+
+# Train control with random search
+rs_control <- trainControl(method = "cv", 
+                           number = 3, 
+                           search = "random",
+                           verboseIter = TRUE
+                           )
+
+# Training
+cvranger <- train(form = shares ~ .,
+                   data = train_no_zero,
+                   method = "ranger",
+                   tuneLength = 30,
+                   trControl = rs_control
+                  ) 
+#best RMSE: mtry = 24, splitrule:extratrees, min.node.size = 1
+
+```
+
+In this part, we are going to train the random forest on the train dataset of `no_zero` data with the best hyperparameters and 500 trees. 
+```{r}
+set.seed(820)
+
+ranger.fit = ranger(data = train_no_zero,shares~., importance ="impurity", splitrule ="extratrees", mtry = 24, min.node.size = 1 )
+pred <- predict(ranger.fit, data=test_no_zero)$predictions
+
+rmse_rf_no_zero = rmse(actual = test_no_zero$shares, predicted = pred)
+print("The rmse on the test dataset of no_zero data is:")
+print(rmse_rf_no_zero)
+
+mae_rf_no_zero = mae(actual = test_no_zero$shares, predicted = pred)
+print("The mae on the test dataset of no_zero data is:")
+print(mae_rf_no_zero)
+```
+
+
+
+###feature importance from random forest
+The importance of the 40 predictive variables were calculated according to the `impurity` measure. Below, you can see the predictive variables sorted by their impurity. The ones with the highest impurity are the most important ones in the model. 
+```{r}
+imp = data.frame(features = names(importance(ranger.fit)), impurity= importance(ranger.fit))
+imp = arrange(imp, desc(impurity))
+knitr:: kable(imp)
+```
+
+
+###Boosting
+For training a boosting model on the data, `xgb.train` function from `xgboost` package was used, and also for tuning the hyperparameters, the `xgb.cv` function from the same library was used to do the cross-validation.  
+
+###prepare data for boosting
+The `xgb.cv` and `xgb.train` functions require the datasets( train and test datasets) to be an object of `xgb.DMatrix`. To make the datasets an object of `xgb.DMatrix`, the datasets first need to be matrices. Therefore I first had to hot-encode the factor columns of the datasets.
+
+```{r}
+labels = train_no_zero$shares
+ # ts_label <- test$target
+new_tr <- model.matrix(~.+0,data = train_no_zero[,-39]) 
+new_ts <- model.matrix(~.+0,data = test_no_zero[,-39])
+dim(new_tr)
+dim(new_ts)
+
+trainObject = xgb.DMatrix(new_tr, label= labels)
+testObject = xgb.DMatrix(new_ts)
+```
+
+##tuning parameters for boosting
+The `xgboost` package has an internal cross-validation function `xgb.cv`. This function does the nfold cross validation(3 fold in our case) on the the data(`train_no_zero` in our case). It trains the model on the training folds and calculates the test RMSE(`eval_metric = RMSE`) on the validation folds. This process is repeated until the test rmse is not further reduced for a certain number of rounds(This parameter is early stopping round and was set to 10 in our tuning process. ). This function only does the cross validation part of model tuning, so for the `search` part we randomly selected 50 parameter settings for the `xgb.train` function from the following ranges:
+
+* `max_depth` a random selected number from 6,7,8,9, and 10. 
+* `eta` =  a uniform random number from this range (0.01, 0.3)
+* `gamma` = a uniform random number from this range (0, 1) 
+* `subsample` = a uniform random number from this range (0.6, 0.9) 
+* `colsample_bytree` = a uniform random number from this range (0.5, 0.8) 
+* `min_child_weight` = a random selected number from 1,2,3,...,40. 
+* `nrounds`: This parameter is selected by `xgb.cv` for each parameter setting. 
+* Seed.number: This is not an argument of `xgb.train` function, but affects the model training. Therefore, I also tried different seeds in each iteration.
+
+The best parameter setting, and best seed number was updated at the end of each iteration only if the new parameter setting had led to a lower test_rmse. 
+The best setting of parameters are: `max_depth`: 7, `eta` : 0.01987414, `gamma`: 0.1376651, `subsample`: 0.6533908, `colsample_bytree` : 0.7397481, `min_child_weight`: 38, `nrounds`: 328
+The best seed number was 339.  
+Since the tuning part takes so long to run, eval was set to False
+
+```{r, eval = F}
+
+
+set.seed(820)
+best_param = list()
+best_seednumber = 1234
+best_logloss = Inf
+best_logloss_index = 0
+start = Sys.time()
+for (iter in 1:50) {
+    param <- list(objective = "reg:squarederror",
+          eval_metric = "rmse",
+          max_depth = sample(6:10, 1),
+          eta = runif(1, .01, .3),
+          gamma = runif(1, 0.0, 1), 
+          subsample = runif(1, .6, .9),
+          colsample_bytree = runif(1, .5, .8), 
+          min_child_weight = sample(1:40, 1)
+          )
+    cv.nround = 1000
+    cv.nfold = 3
+    seed.number = sample.int(10000, 1)[[1]]
+    set.seed(seed.number)
+    mdcv <- xgb.cv(data=trainObject, params = param, nthread=6, 
+                    nfold=cv.nfold, nrounds=cv.nround,
+                    verbose = T, early.stop.round=8, maximize=FALSE, print_every_n = 20)
+
+    min_logloss = min(mdcv$evaluation_log[, test_rmse_mean])
+    min_logloss_index = which.min(mdcv$evaluation_log[, test_rmse_mean])
+
+    if (min_logloss < best_logloss) {
+        best_logloss = min_logloss
+        best_logloss_index = min_logloss_index
+        best_seednumber = seed.number
+        best_param = param
+    }
+}
+finish = Sys.time()
+
+```
+
+## model fitting boosting
+In this part, we are going to train the boosting model on the train dataset of `no_zero` data with the best hyperparameters.
+```{r}
+set.seed(339)
+nround = 328
+best_param= list(
+          max_depth = 7,
+          eta = 0.01987414,
+          gamma = 0.1376651, 
+          subsample = 0.6533908,
+          colsample_bytree = 0.7397481, 
+          min_child_weight = 38)
+xgb.fit <- xgb.train(data=trainObject, params=best_param, nrounds=nround, nthread=6)
+pred <- predict(xgb.fit, newdata=testObject)
+res = data.frame(pred = pred, actual= test_no_zero$shares)
+
+```
+
+
+```{r}
+rmse_xgb_no_zero = rmse(actual = test_no_zero$shares, predicted = pred)
+print("The rmse on the test dataset of no_zero data is:")
+print(rmse_xgb_no_zero)
+mae_xgb_no_zero = mae(actual = test_no_zero$shares, predicted = pred)
+print("The mae on the test dataset of no_zero data is:")
+print(mae_xgb_no_zero)
+```
+
+
+##feature importance
+The importance of the 40 predictive variables were calculated based on their relative influence. This measure which indicates the relative contribution of each feature to the model is stored in the `Gain` column in the table below. You can see the predictive variables sorted by their Gain. The ones with the highest Gain are the most important ones in the model. 
+
+```{r}
+knitr::kable(xgb.importance(model = xgb.fit))
+
+```
+
+
+##lasso
+The last model that was trained on the `no_zero` data is lasso. This model also has a hyperparameter which controls the regularization and needs to be tuned. `glmnet` library was used to both tune the model and fit it on the train data. `cv.glmnet`  does a k fold( 10 fold in our case) cross-validation and searches for the best lambda among a given list of lambdas.  This list in our case was given by $lambda_seq <- 10^seq(2, -2, by = -.1)$
+and the best lambda which minimized the average `mse` on the test folds was 0.01. Note that rmse that we tried to minimize in the other sections is the root of mse and since square root is monotone, the lambda which minimizes mse also minimized the rmse.
+```{r, eval = F}
+set.seed(820)
+lambda_seq <- 10^seq(2, -2, by = -.1)
+cv_output <- cv.glmnet(new_tr, labels, 
+            alpha = 1, lambda = lambda_seq, type.measure = "mse", nfold = 10)
+
+# identifying best lamda
+best_lam <- cv_output$lambda.min
+
+
+```
+
+In this part, we are going to train the lasso model on the train dataset of `no_zero` data with the best lambda. 
+```{r}
+lasso.fit = glmnet(new_tr, labels,  alpha = 1, lambda = 0.01)
+pred <- predict(lasso.fit, s = best_lam, newx = new_ts)
+rmse_lasso_no_zero = rmse(actual = test_no_zero$shares, predicted = pred)
+print("The rmse on the test dataset of no_zero data is:")
+print(rmse_lasso_no_zero)
+mae_lasso_no_zero = mae(actual = test_no_zero$shares, predicted = pred)
+print("The mae on the test dataset of no_zero data is:")
+print(mae_lasso_no_zero)
+
+```
+
+##Feature importance from lasso
+Below, you can see the coefficients of each feature, and the ones with no value means that they were shrinked to zero. In other words, those shrinked to zero are the unimportant variables according to the lasso model. 
+```{r}
+coef_lasso_no_zero = coef(lasso.fit)
+coef_lasso_noZero =data.frame(names = rownames(as.matrix(coef_lasso_no_zero)), values = as.matrix(coef_lasso_no_zero)[,1] )
+positive_no_zero = as.character(coef_lasso_noZero[ coef_lasso_noZero$values>0, 'names'])
+negative_no_zero = as.character(coef_lasso_noZero[ coef_lasso_noZero$values<0, 'names'])
+print(coef_lasso_no_zero)
+```
+
+
+##II) Model Building for no_shares
+
+#Train/test split
+```{r}
+set.seed(116)
+inTrain_no_shares = createDataPartition(y= no_shares$shares, p=0.75, list = F)
+train_no_shares = no_shares[inTrain_no_shares, ]
+test_no_shares = no_shares[-inTrain_no_shares, ]
+```
+
+
+###random Forest
+The best hyperparameters found for this model on `no_shares` dataset are: splitrule ="extratrees", mtry = 20, and min.node.size = 4
+
+
+
+###tuning for random forest
+```{r, eval = F}
+set.seed(820)
+
+# Train control with random search
+rs_control <- trainControl(method = "cv", 
+                           number = 3, 
+                           search = "random",
+                           verboseIter = TRUE
+                           )
+
+# Training
+cvranger <- train(form = shares ~ .,
+                   data = train_no_shares,
+                   method = "ranger",
+                   tuneLength = 30,
+                   trControl = rs_control
+                  ) 
+
+```
+
+In this part, we are going to train the random forest on the train dataset of `no_shares` data with the best hyperparameters and 500 trees. 
+```{r}
+set.seed(820)
+
+ranger.fit = ranger(data = train_no_shares,shares~., importance ="impurity", splitrule ="extratrees", mtry = 20, min.node.size = 4 )
+pred <- predict(ranger.fit, data=test_no_shares)$predictions
+
+rmse_rf_no_shares = rmse(actual = test_no_shares$shares, predicted = pred)
+print("The rmse on the test dataset of no_shares data is:")
+print(rmse_rf_no_shares)
+
+mae_rf_no_shares = mae(actual = test_no_shares$shares, predicted = pred)
+print("The mae on the test dataset of no_shares data is:")
+print(mae_rf_no_shares)
+```
+
+
+
+###feature importance from random forest
+```{r}
+imp = data.frame(features = names(importance(ranger.fit)), impurity= importance(ranger.fit))
+imp = arrange(imp, desc(impurity))
+knitr:: kable(imp)
+```
+
+
+###Boosting
+
+###prepare data for boosting
+
+```{r}
+labels = train_no_shares$shares
+new_tr <- model.matrix(~.+0,data = train_no_shares[,-36]) 
+new_ts <- model.matrix(~.+0,data = test_no_shares[,-36])
+dim(new_tr)
+dim(new_ts)
+
+trainObject = xgb.DMatrix(new_tr, label= labels)
+testObject = xgb.DMatrix(new_ts)
+```
+
+##tuning parameters for boosting
+
+The best setting of parameters are: `max_depth`: 8, `eta` : 0.01351051, `gamma`: 0.7468976, `subsample`: 0.8414548, `colsample_bytree` : 0.5062725, `min_child_weight`: 31, `nrounds`: 404
+The best seed number was 3361  
+
+```{r, eval = F}
+set.seed(820)
+best_param = list()
+best_seednumber = 1234
+best_logloss = Inf
+best_logloss_index = 0
+start = Sys.time()
+for (iter in 1:50) {
+    param <- list(objective = "reg:squarederror",
+          eval_metric = "rmse",
+          max_depth = sample(6:10, 1),
+          eta = runif(1, .01, .3),
+          gamma = runif(1, 0.0, 1), 
+          subsample = runif(1, .6, .9),
+          colsample_bytree = runif(1, .5, .8), 
+          min_child_weight = sample(1:40, 1)
+          )
+    cv.nround = 1000
+    cv.nfold = 3
+    seed.number = sample.int(10000, 1)[[1]]
+    set.seed(seed.number)
+    mdcv <- xgb.cv(data=trainObject, params = param, nthread=6, 
+                    nfold=cv.nfold, nrounds=cv.nround,
+                    verbose = T, early.stop.round=8, maximize=FALSE, print_every_n = 20)
+
+    min_logloss = min(mdcv$evaluation_log[, test_rmse_mean])
+    min_logloss_index = which.min(mdcv$evaluation_log[, test_rmse_mean])
+
+    if (min_logloss < best_logloss) {
+        best_logloss = min_logloss
+        best_logloss_index = min_logloss_index
+        best_seednumber = seed.number
+        best_param = param
+    }
+}
+finish = Sys.time()
+
+```
+
+## model fitting boosting
+In this part, we are going to train the boosting model on the train dataset of `no_shares` data with the best hyperparameters.
+```{r}
+set.seed(3361)
+nround = 404
+best_param= list(
+          max_depth = 8,
+          eta = 0.01351051,
+          gamma = 0.7468976, 
+          subsample = 0.8414548,
+          colsample_bytree = 0.5062725, 
+          min_child_weight = 31)
+xgb.fit <- xgb.train(data=trainObject, params=best_param, nrounds=nround, nthread=6)
+pred <- predict(xgb.fit, newdata=testObject)
+res = data.frame(pred = pred, actual= test_no_shares$shares)
+
+```
+
+
+```{r}
+rmse_xgb_no_shares = rmse(actual = test_no_shares$shares, predicted = pred)
+print("The rmse on the test dataset of no_shares data is:")
+print(rmse_xgb_no_shares)
+mae_xgb_no_shares = mae(actual = test_no_shares$shares, predicted = pred)
+print("The mae on the test dataset of no_shares data is:")
+print(mae_xgb_no_shares)
+```
+
+
+##feature importance
+
+```{r}
+knitr::kable(xgb.importance(model = xgb.fit))
+
+```
+
+
+##lasso
+
+The best lambda is 0.01
+```{r, eval = F}
+set.seed(820)
+lambda_seq <- 10^seq(2, -2, by = -.1)
+cv_output <- cv.glmnet(new_tr, labels, 
+            alpha = 1, lambda = lambda_seq, type.measure = "mse", nfold = 10)
+
+# identifying best lamda
+best_lam <- cv_output$lambda.min
+
+
+```
+
+In this part, we are going to train the lasso model on the train dataset of `no_shares` data with the best lambda. 
+```{r}
+lasso.fit = glmnet(new_tr, labels,  alpha = 1, lambda = 0.01)
+pred <- predict(lasso.fit, s = best_lam, newx = new_ts)
+rmse_lasso_no_shares = rmse(actual = test_no_shares$shares, predicted = pred)
+print("The rmse on the test dataset of no_shares data is:")
+print(rmse_lasso_no_shares)
+mae_lasso_no_shares = mae(actual = test_no_shares$shares, predicted = pred)
+print("The mae on the test dataset of no_shares data is:")
+print(mae_lasso_no_shares)
+
+```
+
+##Feature importance from lasso
+```{r}
+coef_lasso_no_shares = coef(lasso.fit)
+
+coef_lasso_noShares =data.frame(names = rownames(as.matrix(coef_lasso_no_shares)), values = as.matrix(coef_lasso_no_shares)[,1] )
+positive_no_shares = as.character(coef_lasso_noShares[ coef_lasso_noShares$values>0, 'names'])
+negative_no_shares = as.character(coef_lasso_noShares[ coef_lasso_noShares$values<0, 'names'])
+
+print(coef_lasso_no_shares)
+```
+
+
+##III) Model Building for no_content
+
+#Train/test split
+```{r}
+set.seed(116)
+inTrain_no_content = createDataPartition(y= no_content$shares, p=0.75, list = F)
+train_no_content = no_content[inTrain_no_content, ]
+test_no_content = no_content[-inTrain_no_content, ]
+```
+
+
+###random Forest
+The best hyperparameters found for this model on `no_content` dataset are: splitrule ="maxstat", mtry = 9, and min.node.size = 2
+
+
+
+###tuning for random forest
+```{r, eval = F}
+set.seed(820)
+
+# Train control with random search
+rs_control <- trainControl(method = "cv", 
+                           number = 3, 
+                           search = "random",
+                           verboseIter = TRUE
+                           )
+
+# Training
+cvranger <- train(form = shares ~ .,
+                   data = train_no_content,
+                   method = "ranger",
+                   tuneLength = 30,
+                   trControl = rs_control
+                  ) 
+
+```
+
+In this part, we are going to train the random forest on the train dataset of `no_content` data with the best hyperparameters and 500 trees. 
+```{r}
+set.seed(820)
+
+ranger.fit = ranger(data = train_no_content,shares~., importance ="impurity", splitrule ="maxstat", mtry = 9, min.node.size = 2 )
+pred <- predict(ranger.fit, data=test_no_content)$predictions
+
+rmse_rf_no_content = rmse(actual = test_no_content$shares, predicted = pred)
+print("The rmse on the test dataset of no_content data is:")
+print(rmse_rf_no_content)
+
+mae_rf_no_content = mae(actual = test_no_content$shares, predicted = pred)
+print("The mae on the test dataset of no_content data is:")
+print(mae_rf_no_content)
+```
+
+
+
+###feature importance from random forest
+```{r}
+imp = data.frame(features = names(importance(ranger.fit)), impurity= importance(ranger.fit))
+imp = arrange(imp, desc(impurity))
+knitr:: kable(imp)
+```
+
+
+###Boosting
+
+###prepare data for boosting
+
+```{r}
+labels = train_no_content$shares
+new_tr <- model.matrix(~.+0,data = train_no_content[,-18]) 
+new_ts <- model.matrix(~.+0,data = test_no_content[,-18])
+dim(new_tr)
+dim(new_ts)
+
+trainObject = xgb.DMatrix(new_tr, label= labels)
+testObject = xgb.DMatrix(new_ts)
+```
+
+##tuning parameters for boosting
+
+The best setting of parameters are: `max_depth`: 9, `eta` : 0.03783421, `gamma`: 0.4373984, `subsample`: 0.8991138, `colsample_bytree` : 0.6359289, `min_child_weight`: 26, `nrounds`: 118
+The best seed number was 3326.  
+
+```{r, eval = F}
+
+
+set.seed(820)
+best_param = list()
+best_seednumber = 1234
+best_logloss = Inf
+best_logloss_index = 0
+start = Sys.time()
+for (iter in 1:50) {
+    param <- list(objective = "reg:squarederror",
+          eval_metric = "rmse",
+          max_depth = sample(6:10, 1),
+          eta = runif(1, .01, .3),
+          gamma = runif(1, 0.0, 1), 
+          subsample = runif(1, .6, .9),
+          colsample_bytree = runif(1, .5, .8), 
+          min_child_weight = sample(1:40, 1)
+          )
+    cv.nround = 1000
+    cv.nfold = 3
+    seed.number = sample.int(10000, 1)[[1]]
+    set.seed(seed.number)
+    mdcv <- xgb.cv(data=trainObject, params = param, nthread=6, 
+                    nfold=cv.nfold, nrounds=cv.nround,
+                    verbose = T, early.stop.round=8, maximize=FALSE, print_every_n = 20)
+
+    min_logloss = min(mdcv$evaluation_log[, test_rmse_mean])
+    min_logloss_index = which.min(mdcv$evaluation_log[, test_rmse_mean])
+
+    if (min_logloss < best_logloss) {
+        best_logloss = min_logloss
+        best_logloss_index = min_logloss_index
+        best_seednumber = seed.number
+        best_param = param
+    }
+}
+finish = Sys.time()
+
+```
+
+## model fitting boosting
+In this part, we are going to train the boosting model on the train dataset of `no_content` data with the best hyperparameters.
+```{r}
+set.seed(3326)
+nround = 118
+best_param= list(
+          max_depth = 9,
+          eta = 0.03783421,
+          gamma = 0.4373984, 
+          subsample = 0.8991138,
+          colsample_bytree = 0.6359289, 
+          min_child_weight = 26)
+xgb.fit <- xgb.train(data=trainObject, params=best_param, nrounds=nround, nthread=6)
+pred <- predict(xgb.fit, newdata=testObject)
+res = data.frame(pred = pred, actual= test_no_content$shares)
+
+```
+
+
+```{r}
+rmse_xgb_no_content = rmse(actual = test_no_content$shares, predicted = pred)
+print("The rmse on the test dataset of no_content data is:")
+print(rmse_xgb_no_content)
+mae_xgb_no_content = mae(actual = test_no_content$shares, predicted = pred)
+print("The mae on the test dataset of no_content data is:")
+print(mae_xgb_no_content)
+```
+
+
+##feature importance
+
+```{r}
+knitr::kable(xgb.importance(model = xgb.fit))
+
+```
+
+
+##lasso
+The best lambda was 0.03162278.
+```{r, eval = F}
+set.seed(820)
+lambda_seq <- 10^seq(2, -2, by = -.1)
+cv_output <- cv.glmnet(new_tr, labels, 
+            alpha = 1, lambda = lambda_seq, type.measure = "mse", nfold = 10)
+
+# identifying best lamda
+best_lam <- cv_output$lambda.min
+
+
+```
+
+In this part, we are going to train the lasso model on the train dataset of `no_content` data with the best lambda. 
+```{r}
+lasso.fit = glmnet(new_tr, labels,  alpha = 1, lambda = 0.03162278)
+pred <- predict(lasso.fit, s = best_lam, newx = new_ts)
+rmse_lasso_no_content = rmse(actual = test_no_content$shares, predicted = pred)
+print("The rmse on the test dataset of no_content data is:")
+print(rmse_lasso_no_content)
+mae_lasso_no_content = mae(actual = test_no_content$shares, predicted = pred)
+print("The mae on the test dataset of no_content data is:")
+print(mae_lasso_no_content)
+
+```
+
+##Feature importance
+```{r}
+coef_lasso_no_content = coef(lasso.fit)
+coef_lasso_noContent =data.frame(names = rownames(as.matrix(coef_lasso_no_content)), values = as.matrix(coef_lasso_no_content)[,1] )
+positive_no_content = as.character(coef_lasso_noContent[ coef_lasso_noContent$values>0, 'names'])
+negative_no_content = as.character(coef_lasso_noContent[ coef_lasso_noContent$values<0, 'names'])
+
+print(coef_lasso_no_content)
+```
+
+
+
+
+
